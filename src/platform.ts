@@ -3,6 +3,8 @@ import { API, DynamicPlatformPlugin, Logger, PlatformAccessory, PlatformConfig, 
 
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings';
 import { SBDWAccessory } from './accessories/SBDWAccessory';
+import { SBHTAccessory } from './accessories/SBHTAccessory';
+
 import ShellyCloudApi from './oauth';
 import { client as WebSocketClient } from 'websocket';
 import {
@@ -11,6 +13,10 @@ import {
 } from './shellyTypes';
 import BaseAccessory from './accessories/BaseAccessory';
 
+const AccessoriesFactoryMap = {
+  'SBDW': SBDWAccessory,
+  'SBHT': SBHTAccessory,
+};
 
 /**
  * HomebridgePlatform
@@ -18,6 +24,8 @@ import BaseAccessory from './accessories/BaseAccessory';
  * parse the user config and discover/register accessories with Homebridge.
  */
 export class ShellyBluPlatform implements DynamicPlatformPlugin {
+  readonly deviceDelegates: Map<string, BaseAccessory> = new Map();
+
   public readonly Service: typeof Service = this.api.hap.Service;
   public readonly Characteristic: typeof Characteristic = this.api.hap.Characteristic;
 
@@ -61,13 +69,15 @@ export class ShellyBluPlatform implements DynamicPlatformPlugin {
   configureAccessory(platformAccessory: PlatformAccessory) {
     this.log.info('Loading accessory from cache:', platformAccessory.displayName);
 
-    // add the restored accessory to the accessories cache so we can track if it has already been registered
-    if (platformAccessory.context.code.split('-')[0] === 'SBDW') {
-      // create a new accessory
-      const accessory = new SBDWAccessory(this, {
+    const deviceType = platformAccessory.context.code.split('-')[0] 
+    const classToCreate = AccessoriesFactoryMap[deviceType];
+
+    if (classToCreate) {
+      const accessory = new classToCreate(this, {
         uniqueId: platformAccessory.context.uniqueId,
         code: platformAccessory.context.code,
       }, platformAccessory);
+
       this.accessories.push(accessory);
     }
   }
@@ -87,7 +97,7 @@ export class ShellyBluPlatform implements DynamicPlatformPlugin {
           for(const deviceId in (payload.data as any).devices_status) {
             if((payload.data as any).devices_status[deviceId]._dev_info?.gen === 'GBLE') {
               devices.push({
-                uniqueId: deviceId,
+                uniqueId: (payload.data as any).devices_status[deviceId]._dev_info.id,
                 code: (payload.data as any).devices_status[deviceId]._dev_info.code,
                 payload: (payload.data as any).devices_status[deviceId],
               });
@@ -123,18 +133,18 @@ export class ShellyBluPlatform implements DynamicPlatformPlugin {
 
         connection.on('message', (message) => {
           const payload = JSON.parse(message.utf8Data);
+          this.log.debug('Got message! ' + payload);
+
           if(is_shelly_statusonchange(payload)) {
             this.log.debug('%j', payload);
             const uuid = this.api.hap.uuid.generate(payload.device.id as any);
             const existingAccessory = this.accessories.find(accessory => accessory.platformAccessory.UUID === uuid);
-            if(existingAccessory) {
-              if (payload.device.code.split('-')[0] === 'SBDW') {
-                existingAccessory.updateStatus({
-                  uniqueId: payload.device.id,
-                  code: payload.device.code,
-                  payload: payload.status,
-                });
-              }
+            if(existingAccessory && AccessoriesFactoryMap[payload.device.code.split('-')[0]]) {
+              existingAccessory.updateStatus({
+                uniqueId: payload.device.id,
+                code: payload.device.code,
+                payload: payload.status,
+              });
             }
           }
         });
@@ -145,8 +155,9 @@ export class ShellyBluPlatform implements DynamicPlatformPlugin {
   }
 
   registerDevices(devices) {
+    const newAccessories: Array<PlatformAccessory> = [];
+
     // loop over the discovered devices and register each one if it has not already been registered
-    const accessories: Array<PlatformAccessory> = [];
     for (const device of devices) {
 
       // generate a unique id for the accessory this should be generated from
@@ -159,26 +170,28 @@ export class ShellyBluPlatform implements DynamicPlatformPlugin {
       const existingAccessory = this.accessories.find(accessory => accessory.platformAccessory.UUID === uuid);
       this.log.debug('%j', device);
 
-      if (device.code.split('-')[0] === 'SBDW') {
-
-        // create a new accessory
-        const accessory = existingAccessory ?? new SBDWAccessory(this, device);
+      const deviceType = device.code.split('-')[0]
+      const classToCreate = AccessoriesFactoryMap[deviceType];
+  
+      if (classToCreate) {
+        const accessory = new classToCreate(this, device);
 
         if(!existingAccessory) {
           // the accessory does not yet exist, so we need to create it
           this.log.info('Adding new accessory:', device.code);
-          accessories.push(accessory.platformAccessory);
+          newAccessories.push(accessory.platformAccessory)
+          this.accessories.push(accessory);
         } else {
           this.log.info('Restore accessory from cache:', device.code);
           accessory.updateStatus(device);
         }
-      }
 
+      } 
     }
 
-    if(accessories.length > 0) {
+    if(this.accessories.length > 0) {
       // link the accessory to your platform
-      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, accessories);
+      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, newAccessories);
     }
   }
 }
